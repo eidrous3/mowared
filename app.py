@@ -68,7 +68,10 @@ def format_currency(val: Union[float, int, str]) -> str:
         num = float(val)
     except Exception:
         return ""
-    return f"{num:,.2f}{CURRENCY_SUFFIX}"
+    formatted = f"{num:,.2f}"
+    if formatted.endswith(".00"):
+        formatted = formatted[:-3]
+    return f"{formatted}{CURRENCY_SUFFIX}"
 
 
 def compute_dashboard(purchases: pd.DataFrame, payments: pd.DataFrame, n_months: int = 3) -> pd.DataFrame:
@@ -118,9 +121,11 @@ def compute_dashboard(purchases: pd.DataFrame, payments: pd.DataFrame, n_months:
     base = base.merge(total_purchases, on=["branch", "vendor"], how="left").merge(total_payments, on=["branch", "vendor"], how="left").fillna({"total_purchases": 0.0, "total_payments": 0.0})
     base["debt"] = base["total_purchases"] - base["total_payments"]
 
-    total_debt = base["debt"].sum()
-    if total_debt != 0:
-        base["نسبة المورد"] = (base["debt"] / total_debt * 100).round(2)
+    # Supplier share should be out of total positive debts only
+    positive_debt = base["debt"].clip(lower=0.0)
+    total_positive_debt = positive_debt.sum()
+    if total_positive_debt != 0:
+        base["نسبة المورد"] = (positive_debt / total_positive_debt * 100).round(2)
     else:
         base["نسبة المورد"] = 0.0
 
@@ -168,7 +173,7 @@ def df_to_excel_bytes(df: pd.DataFrame, sheet_name: str = "Sheet1") -> bytes:
 
 
 def render_supplier_details(purchases: pd.DataFrame, payments: pd.DataFrame, supplier: Optional[str]):
-    st.subheader("تفاصيل المورد")
+    st.subheader("كشف حساب مورد")
     all_suppliers = sorted(set(purchases["vendor"].dropna().unique()).union(set(payments["vendor"].dropna().unique())))
     if not all_suppliers:
         st.info("لا توجد بيانات موردين بعد.")
@@ -247,75 +252,72 @@ def add_entry_forms():
         tabs = st.tabs(["+ مشتريات", "+ دفعات"])
 
         with tabs[0]:
-            with st.form("add_purchase"):
-                branch = st.selectbox("الفرع", options=BRANCH_OPTIONS, index=0)
-                # Vendors dropdown with ability to add new
-                purchases_df = load_csv(PURCHASES_FILE, PURCHASES_SCHEMA)
-                payments_df = load_csv(PAYMENTS_FILE, PAYMENTS_SCHEMA)
-                all_vendors = sorted(set(purchases_df["vendor"].dropna().unique()).union(set(payments_df["vendor"].dropna().unique())))
-                add_new_label = "إضافة مورد جديد..."
-                vendor_choice = st.selectbox("المورد", options=[add_new_label, *all_vendors])
-                custom_vendor = ""
-                if vendor_choice == add_new_label:
-                    custom_vendor = st.text_input("اسم المورد الجديد")
-                date_val = st.date_input("التاريخ", value=datetime.today())
-                amount = st.number_input("القيمة", min_value=0.0, step=0.5)
-                submitted = st.form_submit_button("حفظ المشتريات")
-                if submitted:
-                    final_vendor = (custom_vendor.strip() if vendor_choice == add_new_label else vendor_choice).strip()
-                    if not branch or not final_vendor:
-                        st.warning("برجاء إدخال الفرع والمورد")
-                    else:
-                        save_row(PURCHASES_FILE, PURCHASES_SCHEMA, {
-                            "branch": branch.strip(),
-                            "vendor": final_vendor,
-                            "date": date_val,
-                            "amount": amount,
-                        })
-                        st.success("تم حفظ المشتريات")
+            branch = st.selectbox("الفرع", options=BRANCH_OPTIONS, index=0, key="p_branch")
+            purchases_df = load_csv(PURCHASES_FILE, PURCHASES_SCHEMA)
+            payments_df = load_csv(PAYMENTS_FILE, PAYMENTS_SCHEMA)
+            all_vendors = sorted(set(purchases_df["vendor"].dropna().unique()).union(set(payments_df["vendor"].dropna().unique())))
+            add_new_label = "إضافة مورد جديد..."
+            vendor_options = [*all_vendors, add_new_label] if all_vendors else [add_new_label]
+            vendor_choice = st.selectbox("المورد", options=vendor_options, index=0, key="p_vendor_choice")
+            custom_vendor = ""
+            if vendor_choice == add_new_label:
+                custom_vendor = st.text_input("اسم المورد الجديد", key="p_vendor_new")
+            date_val = st.date_input("التاريخ", value=datetime.today(), key="p_date")
+            amount = st.number_input("القيمة", min_value=0.0, step=0.5, key="p_amount")
+            if st.button("حفظ المشتريات", key="p_save"):
+                final_vendor = (custom_vendor.strip() if vendor_choice == add_new_label else vendor_choice).strip()
+                if not branch or not final_vendor:
+                    st.warning("برجاء إدخال الفرع والمورد")
+                else:
+                    save_row(PURCHASES_FILE, PURCHASES_SCHEMA, {
+                        "branch": branch.strip(),
+                        "vendor": final_vendor,
+                        "date": date_val,
+                        "amount": amount,
+                    })
+                    st.success("تم حفظ المشتريات")
 
         with tabs[1]:
-            with st.form("add_payment"):
-                branch = st.selectbox("الفرع", options=BRANCH_OPTIONS, index=0, key="pay_branch")
-                purchases_df = load_csv(PURCHASES_FILE, PURCHASES_SCHEMA)
-                payments_df = load_csv(PAYMENTS_FILE, PAYMENTS_SCHEMA)
-                all_vendors = sorted(set(purchases_df["vendor"].dropna().unique()).union(set(payments_df["vendor"].dropna().unique())))
-                add_new_label = "إضافة مورد جديد..."
-                vendor_choice = st.selectbox("المورد", options=[add_new_label, *all_vendors], key="pay_vendor")
-                custom_vendor = ""
-                if vendor_choice == add_new_label:
-                    custom_vendor = st.text_input("اسم المورد الجديد", key="pay_vendor_new")
-                date_val = st.date_input("التاريخ", value=datetime.today(), key="pay_date")
-                amount = st.number_input("القيمة", min_value=0.0, step=0.5, key="pay_amount")
-                # Payment source dropdown with ability to add new
-                source_options = [
-                    "حسام عبد الواحد",
-                    "حساب بنكي",
-                    "أحمد عبد الواحد",
-                    "محمد عطا",
-                ]
-                add_new_source_label = "إضافة مصدر جديد..."
-                source_sel = st.selectbox("مصدر الدفعة", options=[add_new_source_label, *source_options])
-                custom_source = ""
-                if source_sel == add_new_source_label:
-                    custom_source = st.text_input("اكتب مصدر الدفعة")
-                final_source = custom_source.strip() if source_sel == add_new_source_label else source_sel
-                submitted = st.form_submit_button("حفظ الدفعة")
-                if submitted:
-                    final_vendor = (custom_vendor.strip() if vendor_choice == add_new_label else vendor_choice).strip()
-                    if not branch or not final_vendor:
-                        st.warning("برجاء إدخال الفرع والمورد")
-                    elif not final_source:
-                        st.warning("برجاء تحديد مصدر الدفعة")
-                    else:
-                        save_row(PAYMENTS_FILE, PAYMENTS_SCHEMA, {
-                            "branch": branch.strip(),
-                            "vendor": final_vendor,
-                            "date": date_val,
-                            "amount": amount,
-                            "source": final_source,
-                        })
-                        st.success("تم حفظ الدفعة")
+            branch = st.selectbox("الفرع", options=BRANCH_OPTIONS, index=0, key="pay_branch")
+            purchases_df = load_csv(PURCHASES_FILE, PURCHASES_SCHEMA)
+            payments_df = load_csv(PAYMENTS_FILE, PAYMENTS_SCHEMA)
+            all_vendors = sorted(set(purchases_df["vendor"].dropna().unique()).union(set(payments_df["vendor"].dropna().unique())))
+            add_new_label = "إضافة مورد جديد..."
+            vendor_options = [*all_vendors, add_new_label] if all_vendors else [add_new_label]
+            vendor_choice = st.selectbox("المورد", options=vendor_options, index=0, key="pay_vendor")
+            custom_vendor = ""
+            if vendor_choice == add_new_label:
+                custom_vendor = st.text_input("اسم المورد الجديد", key="pay_vendor_new")
+            date_val = st.date_input("التاريخ", value=datetime.today(), key="pay_date")
+            amount = st.number_input("القيمة", min_value=0.0, step=0.5, key="pay_amount")
+            source_options = [
+                "حسام عبد الواحد",
+                "حساب بنكي",
+                "أحمد عبد الواحد",
+                "محمد عطا",
+            ]
+            add_new_source_label = "إضافة مصدر جديد..."
+            source_options_full = [*source_options, add_new_source_label]
+            source_sel = st.selectbox("مصدر الدفعة", options=source_options_full, key="pay_source")
+            custom_source = ""
+            if source_sel == add_new_source_label:
+                custom_source = st.text_input("اكتب مصدر الدفعة", key="pay_source_new")
+            final_source = custom_source.strip() if source_sel == add_new_source_label else source_sel
+            if st.button("حفظ الدفعة", key="pay_save"):
+                final_vendor = (custom_vendor.strip() if vendor_choice == add_new_label else vendor_choice).strip()
+                if not branch or not final_vendor:
+                    st.warning("برجاء إدخال الفرع والمورد")
+                elif not final_source:
+                    st.warning("برجاء تحديد مصدر الدفعة")
+                else:
+                    save_row(PAYMENTS_FILE, PAYMENTS_SCHEMA, {
+                        "branch": branch.strip(),
+                        "vendor": final_vendor,
+                        "date": date_val,
+                        "amount": amount,
+                        "source": final_source,
+                    })
+                    st.success("تم حفظ الدفعة")
 
 
 def main():
@@ -334,7 +336,14 @@ def main():
         .stMarkdown, .stText, .stSelectbox, .stNumberInput, .stDateInput, .stButton, label, .stDataFrame { direction: rtl; text-align: right; }
         thead tr th { text-align: right !important; }
         /* Keep download buttons on one line and widen */
-        .stDownloadButton > button { white-space: nowrap; min-width: 140px; }
+        .stDownloadButton > button { white-space: nowrap; min-width: 140px; margin: 0 12px; }
+        /* Ensure primary buttons like refresh have enough width and spacing */
+        .stButton > button { min-width: 120px; white-space: nowrap; margin: 0 12px; }
+        /* Smaller KPI numbers and labels */
+        div[data-testid="stMetricValue"] { font-size: 1.6rem !important; }
+        div[data-testid="stMetricLabel"] { font-size: 0.95rem !important; }
+        /* KPI card styling */
+        div[data-testid="stMetric"] { background: #f7f7fb; border: 1px solid rgba(0,0,0,0.08); padding: 10px 12px; border-radius: 10px; }
         </style>
         """,
         unsafe_allow_html=True,
@@ -353,7 +362,7 @@ def main():
             else:
                 st.error("رمز غير صحيح")
         st.stop()
-    st.title("لوحة الموردين")
+    # Title removed as requested
 
     purchases = load_csv(PURCHASES_FILE, PURCHASES_SCHEMA)
     payments = load_csv(PAYMENTS_FILE, PAYMENTS_SCHEMA)
@@ -361,21 +370,59 @@ def main():
     add_entry_forms()
 
     st.subheader("نظرة عامة")
+
+    # KPI cards directly under the overview title
+    total_p_all = purchases["amount"].sum() if not purchases.empty else 0.0
+    total_pay_all = payments["amount"].sum() if not payments.empty else 0.0
+    debt_all = total_p_all - total_pay_all
+
+    p_by_branch = (purchases.groupby("branch")["amount"].sum() if not purchases.empty else pd.Series(dtype=float))
+    pay_by_branch = (payments.groupby("branch")["amount"].sum() if not payments.empty else pd.Series(dtype=float))
+    branches = sorted(set(list(p_by_branch.index) + list(pay_by_branch.index)))
+    debt_by_branch = {b: float(p_by_branch.get(b, 0.0) - pay_by_branch.get(b, 0.0)) for b in branches}
+
+    today = datetime.today()
+    this_month = pd.Period(today.strftime("%Y-%m"), freq="M")
+    if not purchases.empty:
+        p_month = purchases.copy()
+        p_month["_ym"] = pd.to_datetime(p_month["date"], errors="coerce").dt.to_period("M")
+        p_month = p_month[p_month["_ym"] == str(this_month)]
+        p_month_by_branch = p_month.groupby("branch")["amount"].sum() if not p_month.empty else pd.Series(dtype=float)
+    else:
+        p_month_by_branch = pd.Series(dtype=float)
+
+    kpi_cols_top = st.columns(5)
+    with kpi_cols_top[0]:
+        st.metric(label="إجمالي المديونية", value=format_currency(debt_all))
+    with kpi_cols_top[1]:
+        st.metric(label="مديونية الإسكندرية", value=format_currency(debt_by_branch.get("الإسكندرية", 0.0)))
+    with kpi_cols_top[2]:
+        st.metric(label="مديونية القاهرة", value=format_currency(debt_by_branch.get("القاهرة", 0.0)))
+    with kpi_cols_top[3]:
+        st.metric(label="مشتريات الإسكندرية (الشهر)", value=format_currency(float(p_month_by_branch.get("الإسكندرية", 0.0))))
+    with kpi_cols_top[4]:
+        st.metric(label="مشتريات القاهرة (الشهر)", value=format_currency(float(p_month_by_branch.get("القاهرة", 0.0))))
     ctrl = st.container()
     with ctrl:
         # Single row: [Export button (far left)] [spacer] [Months dropdown (far right, no label)]
-        col_btn, spacer, col_months = st.columns([2, 8, 2])
+        col_btn, spacer, col_months = st.columns([4, 4, 4])
         with col_months:
             n_months = st.selectbox("", options=list(range(1, 13)), index=2, label_visibility="collapsed")
         # Compute after selection
         dashboard_df = compute_dashboard(purchases, payments, n_months=n_months)
         with col_btn:
-            st.download_button(
-                label="تصدير إكسيل",
-                data=df_to_excel_bytes(dashboard_df, sheet_name="Dashboard"),
-                file_name="dashboard.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            )
+            btn_cols = st.columns([1, 1])
+            with btn_cols[0]:
+                st.download_button(
+                    label="تصدير إكسيل",
+                    data=df_to_excel_bytes(dashboard_df, sheet_name="Dashboard"),
+                    file_name="dashboard.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                )
+            with btn_cols[1]:
+                if st.button("تحديث", type="primary", key="refresh_inline"):
+                    load_csv.clear()
+                    st.rerun()
 
     st.dataframe(dashboard_df, use_container_width=True, hide_index=True)
 
